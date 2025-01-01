@@ -1,10 +1,16 @@
 "use client";
-
+import * as z from "zod";
 import { Message, useChat } from "ai/react";
 import React from "react";
 
-export function useMultiStreamChat() {
-  const { messages, setMessages } = useChat();
+export function useMultiStreamChat({
+  initialMessages,
+}: {
+  initialMessages: Message[];
+}) {
+  const { messages, setMessages } = useChat({
+    initialMessages,
+  });
 
   const appendMultiStream = async (message: {
     role: string;
@@ -40,17 +46,28 @@ export function useMultiStreamChat() {
       const { done, value } = await reader.read();
       if (done) break;
       const decoded = decoder.decode(value);
-      console.log(decoded);
       buffer += decoded;
       const lines = buffer.split("\n");
 
-      console.log("lines", lines);
       for (let i = 0; i < lines.length - 1; i++) {
         if (!lines[i]) continue;
 
         const parsed = JSON.parse(lines[i]);
-        console.log("parsed", parsed);
         const { streamId, chunk } = parsed;
+        let annotations = undefined;
+        try {
+          annotations = z
+            .object({
+              message_annotations: z.array(
+                z.object({
+                  modelId: z.string(),
+                })
+              ),
+            })
+            .parse(JSON.parse(chunk)).message_annotations;
+        } catch (e) {
+          console.log("Error parsing annotations", e);
+        }
 
         // Initialize the AI message for this stream if not already done
         if (!aiMessages[streamId]) {
@@ -59,12 +76,15 @@ export function useMultiStreamChat() {
             id: `${newMessageId}-${streamId}`,
             role: "assistant",
             content: "",
+            annotations,
           };
           setMessages((prev) => [...prev, aiMessage]);
         }
 
         // Update the AI message content
-        aiMessages[streamId] += chunk;
+        if (annotations == null) {
+          aiMessages[streamId] += chunk;
+        }
         setMessages((prev) =>
           prev.map((msg) =>
             msg.id === `${newMessageId}-${streamId}`
@@ -82,7 +102,9 @@ export function useMultiStreamChat() {
 }
 
 export default function ChatComponent() {
-  const { messages, appendMultiStream } = useMultiStreamChat();
+  const { messages, appendMultiStream } = useMultiStreamChat({
+    initialMessages: [],
+  });
   const [input, setInput] = React.useState("");
 
   const sendMessage = (e: React.FormEvent) => {
@@ -95,13 +117,16 @@ export default function ChatComponent() {
     <div>
       <div>
         {messages.map((msg) => (
-          // <div key={msg.id}>
-          //   <strong>{msg.role === "user" ? "User" : "Assistant"}:</strong>{" "}
-          //   {msg.content}
-          // </div>
-          <div key={msg.id}>{JSON.stringify(msg)}</div>
+          <React.Fragment key={msg.id}>
+            <div>
+              <strong>{msg.role === "user" ? "User" : "Assistant"}:</strong>{" "}
+              {msg.content}
+            </div>
+            <div>{JSON.stringify(msg)}</div>
+          </React.Fragment>
         ))}
       </div>
+      <div>{JSON.stringify(messages)}</div>
       <form onSubmit={sendMessage}>
         <input
           type="text"
