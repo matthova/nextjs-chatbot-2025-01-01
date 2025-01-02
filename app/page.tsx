@@ -1,7 +1,9 @@
 "use client";
-import * as z from "zod";
+
 import { Message, useChat } from "ai/react";
 import React from "react";
+import { parseDataStreamPart } from "ai";
+import { v4 } from "uuid";
 
 export function useMultiStreamChat({
   initialMessages,
@@ -16,11 +18,9 @@ export function useMultiStreamChat({
     role: string;
     content: string;
   }) => {
-    const newMessageId = Math.random().toString(36).substring(7); // Generate a unique ID for the user message
-
     // Append the user message
     const userMessage: Message = {
-      id: newMessageId,
+      id: v4(),
       role: "user",
       content: message.content,
     };
@@ -40,7 +40,21 @@ export function useMultiStreamChat({
     if (!reader) return;
 
     let buffer = "";
-    const aiMessages: Record<string, string> = {};
+
+    const modelAMessage: Message = {
+      id: v4(),
+      role: "assistant",
+      content: "",
+      annotations: [{ model: "a" }, { parentMessageId: userMessage.id }],
+    };
+    const modelBMessage: Message = {
+      id: v4(),
+      role: "assistant",
+      content: "",
+      annotations: [{ model: "b" }, { parentMessageId: userMessage.id }],
+    };
+
+    setMessages((prev) => [...prev, modelAMessage, modelBMessage]);
 
     while (true) {
       const { done, value } = await reader.read();
@@ -51,47 +65,33 @@ export function useMultiStreamChat({
 
       for (let i = 0; i < lines.length - 1; i++) {
         if (!lines[i]) continue;
-
-        const parsed = JSON.parse(lines[i]);
-        const { streamId, chunk } = parsed;
-        let annotations = undefined;
-        try {
-          annotations = z
-            .object({
-              message_annotations: z.array(
-                z.object({
-                  modelId: z.string(),
-                })
-              ),
-            })
-            .parse(JSON.parse(chunk)).message_annotations;
-        } catch (e) {
-          console.log("Error parsing annotations", e);
-        }
-
-        // Initialize the AI message for this stream if not already done
-        if (!aiMessages[streamId]) {
-          aiMessages[streamId] = "";
-          const aiMessage: Message = {
-            id: `${newMessageId}-${streamId}`,
-            role: "assistant",
-            content: "",
-            annotations,
-          };
-          setMessages((prev) => [...prev, aiMessage]);
-        }
-
-        // Update the AI message content
-        if (annotations == null) {
-          aiMessages[streamId] += chunk;
-        }
-        setMessages((prev) =>
-          prev.map((msg) =>
-            msg.id === `${newMessageId}-${streamId}`
-              ? { ...msg, content: aiMessages[streamId] }
-              : msg
-          )
-        );
+        const [model, chunk] = splitString(lines[i]);
+        // TODO expand this to handle multiple modalities
+        const { type, value } = parseDataStreamPart(chunk);
+        setMessages((prev) => {
+          const [messages, modelAMessage, modelBMessage] = splitArray(prev);
+          switch (type) {
+            case "text": {
+              if (model === "a") {
+                return [
+                  ...messages,
+                  { ...modelAMessage, content: modelAMessage.content + value },
+                  modelBMessage,
+                ];
+              } else if (model === "b") {
+                return [
+                  ...messages,
+                  modelAMessage,
+                  { ...modelBMessage, content: modelBMessage.content + value },
+                ];
+              } else {
+                return prev;
+              }
+            }
+            default:
+              return prev;
+          }
+        });
       }
 
       buffer = lines[lines.length - 1];
@@ -119,14 +119,11 @@ export default function ChatComponent() {
         {messages.map((msg) => (
           <React.Fragment key={msg.id}>
             <div>
-              <strong>{msg.role === "user" ? "User" : "Assistant"}:</strong>{" "}
-              {msg.content}
+              <strong>{getRoleName(msg)}:</strong> {msg.content}
             </div>
-            <div>{JSON.stringify(msg)}</div>
           </React.Fragment>
         ))}
       </div>
-      <div>{JSON.stringify(messages)}</div>
       <form onSubmit={sendMessage}>
         <input
           type="text"
@@ -138,4 +135,36 @@ export default function ChatComponent() {
       </form>
     </div>
   );
+}
+
+function getRoleName(message: Message) {
+  if (message.role === "user") return "User";
+  if (message.role === "assistant") {
+    if (message.annotations) {
+      const messageModelAnnotation = message.annotations.find(
+        (a) => a?.model != null
+      )?.model;
+      if (messageModelAnnotation === "a") {
+        return "Assistant A";
+      } else if (messageModelAnnotation === "b") {
+        return "Assistant B";
+      }
+      return "Assistant";
+    }
+    return message.role;
+  }
+}
+
+/** Get the model a | b and the rest of the string out of a buffer */
+function splitString(str: string): [string, string] {
+  if (str.length === 0) return ["", ""];
+  return [str.charAt(0), str.slice(1)];
+}
+
+function splitArray(arr: Message[]): [Message[], Message, Message] {
+  if (arr.length < 2) throw new Error("Array must have at least two elements");
+  const allButLastTwo = arr.slice(0, -2);
+  const secondToLast = arr[arr.length - 2];
+  const last = arr[arr.length - 1];
+  return [allButLastTwo, secondToLast, last];
 }
