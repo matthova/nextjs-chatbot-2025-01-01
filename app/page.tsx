@@ -125,8 +125,8 @@ export default function ChatComponent() {
         ))}
       </div>
       <form onSubmit={sendMessage}>
-        <input
-          type="text"
+        <textarea
+          className="bg-white border border-black text-black"
           value={input}
           onChange={(e) => setInput(e.target.value)}
           placeholder="Type a message..."
